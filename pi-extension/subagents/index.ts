@@ -932,17 +932,29 @@ function startWidgetRefresh() {
  */
 async function launchSubagent(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
+  ctx: {
+    sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
+    cwd: string;
+    model?: { provider: string; id: string } | null;
+    thinkingLevel?: string;
+  },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  // Inherit the parent session's model/thinking when neither the spawn params
+  // nor the agent frontmatter specify one. Applies to pi-backed agents only —
+  // CLI agents (e.g. claude-code) use their own model aliases.
+  const parentModel =
+    !agentDefs?.cli && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+  const explicitModel = params.model ?? agentDefs?.model;
+  const effectiveModel = explicitModel ?? parentModel;
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
-  const effectiveThinking = agentDefs?.thinking;
+  const effectiveThinking =
+    agentDefs?.thinking ?? (!explicitModel && parentModel ? ctx.thinkingLevel : undefined);
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
