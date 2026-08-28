@@ -1,6 +1,6 @@
 /**
  * Extension loaded into sub-agents.
- * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
+ * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+Shift+J)
  * - Provides a `subagent_done` tool for autonomous agents to self-terminate
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -8,6 +8,9 @@ import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { writeFileSync } from "node:fs";
 import { createSubagentActivityRecorder } from "./activity.ts";
+
+const TOOLS_WIDGET_SHORTCUT = "ctrl+shift+j";
+const TOOLS_WIDGET_SHORTCUT_LABEL = "Ctrl+Shift+J";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -102,7 +105,7 @@ export default function (pi: ExtensionAPI) {
         if (expanded) {
           // Expanded: full tool list + denied
           const countInfo = theme.fg("dim", ` — ${toolNames.length} available`);
-          const hint = theme.fg("muted", "  (Ctrl+J to collapse)");
+          const hint = theme.fg("muted", `  (${TOOLS_WIDGET_SHORTCUT_LABEL} to collapse)`);
 
           const toolList = toolNames
             .map((name: string) => theme.fg("dim", name))
@@ -129,7 +132,7 @@ export default function (pi: ExtensionAPI) {
             denied.length > 0
               ? theme.fg("dim", " · ") + theme.fg("error", `${denied.length} denied`)
               : "";
-          const hint = theme.fg("muted", "  (Ctrl+J to expand)");
+          const hint = theme.fg("muted", `  (${TOOLS_WIDGET_SHORTCUT_LABEL} to expand)`);
 
           const content = new Text(`${agentTag}${countInfo}${deniedInfo}${hint}`, 0, 0);
           box.addChild(content);
@@ -256,8 +259,8 @@ export default function (pi: ExtensionAPI) {
     recorder.sessionShutdown((event as any).reason);
   });
 
-  // Toggle expand/collapse with Ctrl+J
-  pi.registerShortcut("ctrl+j", {
+  // Ctrl+J is Pi's built-in newline shortcut, so keep the widget toggle distinct.
+  pi.registerShortcut(TOOLS_WIDGET_SHORTCUT, {
     description: "Toggle subagent tools widget",
     handler: (ctx) => {
       expanded = !expanded;

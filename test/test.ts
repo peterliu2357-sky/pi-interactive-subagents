@@ -49,7 +49,7 @@ import {
   getSubagentActivityFile,
   readSubagentActivityFile,
 } from "../pi-extension/subagents/activity.ts";
-import {
+import subagentDoneExtension, {
   shouldMarkUserTookOver,
   shouldAutoExitOnAgentEnd,
   findLatestAssistantError,
@@ -82,12 +82,14 @@ function createMockExtensionApi() {
   const registeredTools: Array<any> = [];
   const registeredCommands: Array<any> = [];
   const registeredMessageRenderers: Array<any> = [];
+  const registeredShortcuts: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
   return {
     registeredTools,
     registeredCommands,
     registeredMessageRenderers,
+    registeredShortcuts,
     sentUserMessages,
     sentMessages,
     api: {
@@ -101,7 +103,9 @@ function createMockExtensionApi() {
       registerMessageRenderer(name: string, renderer: any) {
         registeredMessageRenderers.push({ name, renderer });
       },
-      registerShortcut() {},
+      registerShortcut(shortcut: string, options: any) {
+        registeredShortcuts.push({ shortcut, ...options });
+      },
       sendUserMessage(message: string) {
         sentUserMessages.push(message);
       },
@@ -1217,6 +1221,15 @@ describe("subagent discovery", () => {
   });
 });
 describe("subagent-done.ts", () => {
+  it("does not override Pi's built-in Ctrl+J newline shortcut", () => {
+    const { api, registeredShortcuts } = createMockExtensionApi();
+
+    subagentDoneExtension(api);
+
+    assert.equal(registeredShortcuts.some(({ shortcut }) => shortcut === "ctrl+j"), false);
+    assert.equal(registeredShortcuts.some(({ shortcut }) => shortcut === "ctrl+shift+j"), true);
+  });
+
   describe("shouldMarkUserTookOver", () => {
     it("ignores the initial injected task before the first agent run", () => {
       assert.equal(shouldMarkUserTookOver(false), false);
