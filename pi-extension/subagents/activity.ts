@@ -132,12 +132,19 @@ function validateBoolean(object: Record<string, unknown>, fieldName: string): st
   return typeof object[fieldName] === "boolean" ? null : `${fieldName} must be a boolean`;
 }
 
-function validateOptionalActivityString(object: Record<string, unknown>, fieldName: string): string | null {
-  const value = object[fieldName];
-  if (value == null) return null;
-  if (typeof value !== "string") return `${fieldName} must be a string when present`;
-  if (/\r|\n/.test(value)) return `${fieldName} must not contain newlines`;
-  return value.length <= MAX_ACTIVITY_STRING_LENGTH ? null : `${fieldName} is too long`;
+function sanitizeDiagnosticString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const singleLine = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+  if (singleLine.length <= MAX_ACTIVITY_STRING_LENGTH) return singleLine;
+  return `${singleLine.slice(0, MAX_ACTIVITY_STRING_LENGTH - 1)}…`;
+}
+
+function sanitizeActivityDiagnostics(object: Record<string, unknown>): void {
+  for (const fieldName of ["messageEventType", "toolCallId", "toolName"] as const) {
+    const sanitized = sanitizeDiagnosticString(object[fieldName]);
+    if (sanitized === undefined) delete object[fieldName];
+    else object[fieldName] = sanitized;
+  }
 }
 
 function invalidActivity(error: string): ActivityReadResult {
@@ -176,12 +183,10 @@ function validateActivity(value: unknown, expectedRunningChildId: string): Activ
     validateOptionalInteger(object, "turnIndex"),
     validateOptionalFiniteNumber(object, "toolStartedAt"),
     validateOptionalFiniteNumber(object, "toolEndedAt"),
-    validateOptionalActivityString(object, "messageEventType"),
-    validateOptionalActivityString(object, "toolCallId"),
-    validateOptionalActivityString(object, "toolName"),
   ].find((error) => error != null);
   if (validationError) return invalidActivity(validationError);
 
+  sanitizeActivityDiagnostics(object);
   return { ok: true, activity: object as unknown as SubagentActivityState };
 }
 
@@ -335,6 +340,7 @@ export function createSubagentActivityRecorder(params: {
   function flushNow(): void {
     if (disabled) return;
     try {
+      sanitizeActivityDiagnostics(activity as unknown as Record<string, unknown>);
       writeSubagentActivityFile(activityFile, activity);
       lastFlushAt = now();
       failureCount = 0;

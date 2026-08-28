@@ -55,6 +55,9 @@ import subagentDoneExtension, {
   findLatestAssistantError,
 } from "../pi-extension/subagents/subagent-done.ts";
 import { __pollForExitTest__ } from "../pi-extension/subagents/cmux.ts";
+import { sanitizeSubagentEnv, withEnvVar } from "./helpers/env.ts";
+
+sanitizeSubagentEnv();
 
 // --- Helpers ---
 
@@ -1427,6 +1430,96 @@ describe("tool registration", () => {
     assert.equal(autoExitSchema.type, "boolean");
     assert.match(autoExitSchema.description, /Defaults to true/);
   });
+
+  it("suppresses every denied spawning tool", async () => {
+    await withEnvVar(
+      "PI_DENY_TOOLS",
+      "subagent,subagent_interrupt,subagents_list,subagent_resume",
+      () => {
+        const { api, registeredTools, registeredCommands } = createMockExtensionApi();
+        (subagentsModule as any).default(api);
+
+        const toolNames = registeredTools.map((tool) => tool.name);
+        assert.equal(toolNames.includes("subagent"), false);
+        assert.equal(toolNames.includes("subagent_interrupt"), false);
+        assert.equal(toolNames.includes("subagents_list"), false);
+        assert.equal(toolNames.includes("subagent_resume"), false);
+        assert.equal(registeredCommands.some((command) => command.name === "iterate"), true);
+      },
+    );
+  });
+
+  it("suppresses only the tools named in a partial deny list", async () => {
+    await withEnvVar("PI_DENY_TOOLS", "subagent", () => {
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+
+      const toolNames = registeredTools.map((tool) => tool.name);
+      assert.equal(toolNames.includes("subagent"), false);
+      assert.equal(toolNames.includes("subagent_interrupt"), true);
+      assert.equal(toolNames.includes("subagents_list"), true);
+      assert.equal(toolNames.includes("subagent_resume"), true);
+    });
+  });
+
+  it("trims whitespace and ignores empty deny-list entries", async () => {
+    await withEnvVar("PI_DENY_TOOLS", " , subagent , ", () => {
+      const { api, registeredTools } = createMockExtensionApi();
+      (subagentsModule as any).default(api);
+
+      const toolNames = registeredTools.map((tool) => tool.name);
+      assert.equal(toolNames.includes("subagent"), false);
+      assert.equal(toolNames.includes("subagent_interrupt"), true);
+    });
+  });
+});
+
+describe("test environment isolation", () => {
+  it("clears child identity without removing user subagent configuration", async () => {
+    await withEnvVar("PI_DENY_TOOLS", "subagent", async () => {
+      await withEnvVar("PI_SUBAGENT_NAME", "test-child", async () => {
+        await withEnvVar("PI_SUBAGENT_MUX", "cmux", () => {
+          sanitizeSubagentEnv();
+
+          assert.equal(process.env.PI_DENY_TOOLS, undefined);
+          assert.equal(process.env.PI_SUBAGENT_NAME, undefined);
+          assert.equal(process.env.PI_SUBAGENT_MUX, "cmux");
+        });
+      });
+    });
+  });
+});
+
+describe("subagent runtime lifecycle", () => {
+  it("session shutdown aborts old watchers without poisoning the next runtime", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const firstRuntime = testApi.createRuntimeAbortScope();
+    const firstWatcher = new AbortController();
+    const firstCombined = testApi.combineWatcherAbortSignals(
+      firstWatcher.signal,
+      firstRuntime.signal,
+    );
+
+    firstRuntime.abort();
+
+    const secondRuntime = testApi.createRuntimeAbortScope();
+    const secondWatcher = new AbortController();
+    const secondCombined = testApi.combineWatcherAbortSignals(
+      secondWatcher.signal,
+      secondRuntime.signal,
+    );
+
+    assert.equal(firstCombined.aborted, true);
+    assert.equal(secondCombined.aborted, false);
+  });
+
+  it("suppresses only explicitly cancelled watcher results", () => {
+    const testApi = (subagentsModule as any).__test__;
+
+    assert.equal(testApi.shouldDeliverSubagentResult({ cancelled: true }), false);
+    assert.equal(testApi.shouldDeliverSubagentResult({ error: "cancelled" }), true);
+    assert.equal(testApi.shouldDeliverSubagentResult({ exitCode: 0 }), true);
+  });
 });
 
 describe("subagent activity snapshots", () => {
@@ -1472,6 +1565,55 @@ describe("subagent activity snapshots", () => {
     });
   });
 
+  it("bounds diagnostic metadata before writing activity snapshots", () => {
+    withTempDir((dir) => {
+      const activityFile = getSubagentActivityFile(dir, "child-long-writer");
+      const recorder = createSubagentActivityRecorder({
+        runningChildId: "child-long-writer",
+        activityFile,
+        now: () => 1_000,
+      });
+      const longToolCallId = "x".repeat(454);
+
+      recorder.sessionStart();
+      recorder.messageUpdate("delta\nwith-newline");
+      recorder.toolExecutionStart(longToolCallId, "bash\ncommand\u001b[31m");
+
+      const read = readSubagentActivityFile(activityFile, "child-long-writer");
+      assert.ok(read.ok);
+      assert.equal(read.activity.toolCallId?.length, 200);
+      assert.equal(read.activity.toolCallId?.endsWith("…"), true);
+      assert.equal(read.activity.toolName, "bash command [31m");
+      assert.equal(read.activity.messageEventType, "delta with-newline");
+    });
+  });
+
+  it("accepts and sanitizes oversized diagnostics from older writers", () => {
+    withTempDir((dir) => {
+      const activityFile = getSubagentActivityFile(dir, "child-long-reader");
+      mkdirSync(join(dir, "subagent-activity"), { recursive: true });
+      const activity = validActivity({
+        runningChildId: "child-long-reader",
+        phase: "active",
+        agentActive: true,
+        turnActive: true,
+        toolActive: true,
+        activeScope: "tool",
+        toolCallId: "x".repeat(454),
+        toolName: "bash\ncommand",
+        messageEventType: 42,
+      });
+      writeFileSync(activityFile, `${JSON.stringify(activity)}\n`);
+
+      const read = readSubagentActivityFile(activityFile, "child-long-reader");
+      assert.ok(read.ok);
+      assert.equal(read.activity.phase, "active");
+      assert.equal(read.activity.toolCallId?.length, 200);
+      assert.equal(read.activity.toolName, "bash command");
+      assert.equal(read.activity.messageEventType, undefined);
+    });
+  });
+
   it("records waiting and final done states", () => {
     withTempDir((dir) => {
       let currentNow = 2_000;
@@ -1499,17 +1641,20 @@ describe("subagent activity snapshots", () => {
     });
   });
 
-  it("rejects malformed activity fields used by classification and rendering", () => {
+  it("rejects malformed liveness fields", () => {
     withTempDir((dir) => {
       mkdirSync(join(dir, "subagent-activity"), { recursive: true });
       const cases = [
+        { createdAt: "bad" },
+        { updatedAt: "bad" },
+        { sequence: 1.5 },
         { activeSince: "bad" },
         { waitingSince: "bad" },
+        { phase: "sleeping" },
         { activeScope: "database" },
         { latestEvent: "unknown" },
         { runningChildId: 42 },
         { toolActive: "yes" },
-        { toolName: "bad\nname" },
       ];
 
       for (const [index, overrides] of cases.entries()) {

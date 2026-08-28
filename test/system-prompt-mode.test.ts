@@ -5,6 +5,9 @@
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { sanitizeSubagentEnv } from "./helpers/env.ts";
+
+sanitizeSubagentEnv();
 
 let passed = 0;
 let failed = 0;

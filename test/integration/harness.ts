@@ -22,6 +22,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { sanitizeSubagentEnv } from "../helpers/env.ts";
 import {
   getMuxBackend,
   createSurface,
@@ -37,6 +38,8 @@ import {
   parseCmuxPaneRefForSurfaceFromJson,
   type MuxBackend,
 } from "../../pi-extension/subagents/cmux.ts";
+
+sanitizeSubagentEnv();
 
 // Re-export mux primitives for tests
 export {

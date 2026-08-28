@@ -77,11 +77,13 @@ const POLL_ABORT_KEY = Symbol.for("pi-subagents/poll-abort-controller");
   }
   const prevAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
   if (prevAbort) prevAbort.abort();
-  (globalThis as any)[POLL_ABORT_KEY] = new AbortController();
 }
 
+const moduleGenerationAbortController = new AbortController();
+(globalThis as any)[POLL_ABORT_KEY] = moduleGenerationAbortController;
+
 function getModuleAbortSignal(): AbortSignal {
-  return ((globalThis as any)[POLL_ABORT_KEY] as AbortController).signal;
+  return moduleGenerationAbortController.signal;
 }
 
 const SubagentParams = Type.Object({
@@ -478,6 +480,7 @@ interface SubagentResult {
   exitCode: number;
   elapsed: number;
   error?: string;
+  cancelled?: boolean;
   /** Provider/agent error message when auto-retry exhausted (overload, rate limit, etc.). */
   errorMessage?: string;
   ping?: { name: string; message: string };
@@ -892,6 +895,25 @@ function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): { autoExit
   return { autoExit, interactive: !autoExit };
 }
 
+function createRuntimeAbortScope(): { signal: AbortSignal; abort: () => void } {
+  const controller = new AbortController();
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+  };
+}
+
+function combineWatcherAbortSignals(
+  watcherSignal: AbortSignal,
+  runtimeSignal: AbortSignal,
+): AbortSignal {
+  return AbortSignal.any([watcherSignal, runtimeSignal, getModuleAbortSignal()]);
+}
+
+function shouldDeliverSubagentResult(result: Pick<SubagentResult, "cancelled">): boolean {
+  return result.cancelled !== true;
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -911,6 +933,9 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  createRuntimeAbortScope,
+  combineWatcherAbortSignals,
+  shouldDeliverSubagentResult,
   runningSubagents,
   formatElapsed,
 };
@@ -1258,11 +1283,13 @@ function copyClaudeSession(sentinelFile: string): string | null {
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
+  runtimeSignal: AbortSignal,
 ): Promise<SubagentResult> {
   const { name, task, surface, startTime, sessionFile } = running;
+  const combinedSignal = combineWatcherAbortSignals(signal, runtimeSignal);
 
   try {
-    const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
+    const result = await pollForExit(surface, combinedSignal, {
       interval: 1000,
       sessionFile,
       sentinelFile: running.sentinelFile,
@@ -1347,14 +1374,14 @@ async function watchSubagent(
     } catch {}
     runningSubagents.delete(running.id);
 
-    if (signal.aborted) {
+    if (combinedSignal.aborted) {
       return {
         name,
         task,
         summary: "Subagent cancelled.",
         exitCode: 1,
         elapsed: Math.floor((Date.now() - startTime) / 1000),
-        error: "cancelled",
+        cancelled: true,
         sessionFile,
       };
     }
@@ -1370,6 +1397,8 @@ async function watchSubagent(
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
+  const runtimeAbortScope = createRuntimeAbortScope();
+
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
@@ -1387,8 +1416,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       statusInterval = null;
       (globalThis as any)[STATUS_INTERVAL_KEY] = null;
     }
-    const moduleAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
-    if (moduleAbort) moduleAbort.abort();
+    runtimeAbortScope.abort();
     for (const [_id, agent] of runningSubagents) {
       agent.abortController?.abort();
     }
@@ -1471,9 +1499,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         startStatusRefresh(pi);
 
         // Fire-and-forget: start watching in background
-        watchSubagent(running, watcherAbort.signal)
+        watchSubagent(running, watcherAbort.signal, runtimeAbortScope.signal)
           .then((result) => {
             updateWidget(); // reflect removal from Map immediately
+            if (!shouldDeliverSubagentResult(result)) return;
 
             if (result.ping) {
               // Subagent is requesting help — steer a ping message with session path for resume
@@ -1898,9 +1927,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const watcherAbort = new AbortController();
         running.abortController = watcherAbort;
 
-        watchSubagent(running, watcherAbort.signal)
+        watchSubagent(running, watcherAbort.signal, runtimeAbortScope.signal)
           .then((result) => {
             updateWidget();
+            if (!shouldDeliverSubagentResult(result)) return;
 
             if (result.ping) {
               const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
